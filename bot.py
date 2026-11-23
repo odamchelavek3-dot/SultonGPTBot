@@ -93,7 +93,7 @@ def keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Assalomu alaykum! Men SultonGPT 🤖\n\n"
+        "Assalomu alaykum! Men Sulton 🤖\n\n"
         "Men siz bilan suhbatlashaman, savollaringizga javob beraman "
         "va turli vazifalarda yordam beraman.\n\n"
         "Suhbatni boshlash uchun xabar yozing!",
