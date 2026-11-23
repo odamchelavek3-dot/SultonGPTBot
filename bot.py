@@ -19,7 +19,9 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
@@ -30,7 +32,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
 logger = logging.getLogger(__name__)
+
+# HTTP loglarida Telegram tokeni ko'rinmasligi uchun
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -73,12 +80,16 @@ def get_history(user_id):
             "WHERE user_id = ? ORDER BY id DESC LIMIT 12",
             (user_id,),
         ).fetchall()
+
     return list(reversed(rows))
 
 
 def clear_history(user_id):
     with sqlite3.connect(DB_NAME) as db:
-        db.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
+        db.execute(
+            "DELETE FROM history WHERE user_id = ?",
+            (user_id,),
+        )
 
 
 def keyboard():
@@ -93,7 +104,7 @@ def keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Assalomu alaykum! Men Sulton 🤖\n\n"
+        "Assalomu alaykum! Men SultonGPT 🤖\n\n"
         "Men siz bilan suhbatlashaman, savollaringizga javob beraman "
         "va turli vazifalarda yordam beraman.\n\n"
         "Suhbatni boshlash uchun xabar yozing!",
@@ -106,7 +117,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 SultonGPT yordamchisi\n\n"
         "• Istalgan savolingizni yozing.\n"
         "• Ovozli xabar yuborishingiz mumkin.\n"
-        "• Xotirani tozalash tugmasi suhbat tarixini o‘chiradi.\n\n"
+        "• Xotirani tozalash tugmasi suhbat tarixini o'chiradi.\n\n"
         "Eslatma: ovozli xabarni tahlil qilish funksiyasi hali ulanmagan.",
         reply_markup=keyboard(),
     )
@@ -121,20 +132,41 @@ async def ask_gemini(user_id, question):
     conversation.append(f"user: {question}")
 
     prompt = (
-        "Sen SultonGPT nomli foydali, samimiy va aqlli o‘zbek AI "
-        "yordamchisisan. Asosan o‘zbek tilida sodda va tushunarli "
-        "javob ber. Foydalanuvchiga hurmat bilan murojaat qil.\n\n"
+        "Sen SultonGPT nomli foydali, samimiy va aqlli o'zbek "
+        "AI yordamchisisan. Asosan o'zbek tilida sodda va "
+        "tushunarli javob ber. Foydalanuvchiga hurmat bilan murojaat qil.\n\n"
         + "\n".join(conversation)
         + "\nassistant:"
     )
 
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=MODEL,
-        contents=prompt,
-    )
+    # Avval asosiy modelni sinaymiz
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL,
+            contents=prompt,
+        )
 
-    return response.text or "Kechirasiz, hozir javob tayyorlay olmadim."
+        return response.text or "Kechirasiz, javob tayyorlay olmadim."
+
+    except Exception as error:
+        error_text = str(error)
+
+        # Faqat server bandligi bo'lsa zaxira modelga o'tamiz
+        if "503" not in error_text and "UNAVAILABLE" not in error_text:
+            raise
+
+        logger.warning(
+            "Asosiy Gemini modeli band. Zaxira model ishga tushmoqda."
+        )
+
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=FALLBACK_MODEL,
+            contents=prompt,
+        )
+
+        return response.text or "Kechirasiz, javob tayyorlay olmadim."
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,12 +177,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     question = update.message.text.strip()
 
     if question == "🤖 AI bilan suhbat":
-        await update.message.reply_text("Marhamat, savolingizni yozing! 😊")
+        await update.message.reply_text(
+            "Marhamat, savolingizni yozing! 😊"
+        )
         return
 
     if question == "🧠 Xotirani tozalash":
         clear_history(user_id)
-        await update.message.reply_text("Suhbat xotirasi tozalandi! 🧹")
+        await update.message.reply_text(
+            "Suhbat xotirasi tozalandi! 🧹"
+        )
         return
 
     if question == "ℹ️ Yordam":
@@ -162,12 +198,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = asyncio.get_running_loop().time()
+
     if now - user_last_message.get(user_id, 0) < 3:
-        await update.message.reply_text("Iltimos, biroz kutib turing. 😊")
+        await update.message.reply_text(
+            "Iltimos, biroz kutib turing. 😊"
+        )
         return
 
     user_last_message[user_id] = now
-    wait = await update.message.reply_text("⏳ Javob tayyorlayapman...")
+
+    wait = await update.message.reply_text(
+        "⏳ Javob tayyorlayapman..."
+    )
 
     try:
         answer = await ask_gemini(user_id, question)
@@ -179,20 +221,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await wait.edit_text(answer)
         else:
             await wait.edit_text(answer[:4000])
+
             for i in range(4000, len(answer), 4000):
-                await update.message.reply_text(answer[i:i + 4000])
+                await update.message.reply_text(
+                    answer[i:i + 4000]
+                )
 
     except Exception:
         logger.exception("Gemini xatosi")
+
         await wait.edit_text(
-            "Kechirasiz, xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring."
+            "Kechirasiz, AI xizmatida vaqtinchalik xatolik yuz berdi. "
+            "Birozdan keyin qayta urinib ko'ring."
         )
 
 
 async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎤 Ovozli xabaringizni oldim. Ovoz bilan ishlash funksiyasini "
-        "keyingi bosqichda ulaymiz."
+        "🎤 Ovozli xabaringizni oldim. "
+        "Ovoz bilan ishlash funksiyasini keyingi bosqichda ulaymiz."
     )
 
 
@@ -205,9 +252,14 @@ def main():
         "RENDER_EXTERNAL_URL": RENDER_URL,
     }
 
-    missing = [key for key, value in required.items() if not value]
+    missing = [
+        key for key, value in required.items() if not value
+    ]
+
     if missing:
-        raise ValueError("Sozlanmagan o'zgaruvchilar: " + ", ".join(missing))
+        raise ValueError(
+            "Sozlanmagan o'zgaruvchilar: " + ", ".join(missing)
+        )
 
     init_db()
 
@@ -215,9 +267,16 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.VOICE, voice_message))
+
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        MessageHandler(filters.VOICE, voice_message)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message,
+        )
     )
 
     logger.info("SULTONGPT WEBHOOK ISHGA TUSHMOQDA")
