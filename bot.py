@@ -3,8 +3,8 @@ import os
 import logging
 import sqlite3
 import asyncio
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -21,7 +21,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
-BOT_NAME = "SultonGPT"
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -66,7 +69,8 @@ def save_message(user_id, role, content):
 def get_history(user_id):
     with sqlite3.connect(DB_NAME) as db:
         rows = db.execute(
-            "SELECT role, content FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 12",
+            "SELECT role, content FROM history "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 12",
             (user_id,),
         ).fetchall()
     return list(reversed(rows))
@@ -88,13 +92,13 @@ def keyboard():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "Assalomu alaykum! Men SultonGPT 🤖\n\n"
         "Men siz bilan suhbatlashaman, savollaringizga javob beraman "
         "va turli vazifalarda yordam beraman.\n\n"
-        "Suhbatni boshlash uchun xabar yozing!"
+        "Suhbatni boshlash uchun xabar yozing!",
+        reply_markup=keyboard(),
     )
-    await update.message.reply_text(text, reply_markup=keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -102,7 +106,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 SultonGPT yordamchisi\n\n"
         "• Istalgan savolingizni yozing.\n"
         "• Ovozli xabar yuborishingiz mumkin.\n"
-        "• Xotirani tozalash tugmasi orqali suhbat tarixini o‘chirasiz.",
+        "• Xotirani tozalash tugmasi suhbat tarixini o‘chiradi.\n\n"
+        "Eslatma: ovozli xabarni tahlil qilish funksiyasi hali ulanmagan.",
         reply_markup=keyboard(),
     )
 
@@ -110,16 +115,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_gemini(user_id, question):
     history = get_history(user_id)
 
-    conversation = []
-    for role, content in history:
-        conversation.append(f"{role}: {content}")
-
+    conversation = [
+        f"{role}: {content}" for role, content in history
+    ]
     conversation.append(f"user: {question}")
 
     prompt = (
-        "Sen SultonGPT nomli foydali, samimiy va aqlli o‘zbek AI yordamchisisan. "
-        "Asosan o‘zbek tilida sodda va tushunarli javob ber. "
-        "Foydalanuvchiga hurmat bilan murojaat qil.\n\n"
+        "Sen SultonGPT nomli foydali, samimiy va aqlli o‘zbek AI "
+        "yordamchisisan. Asosan o‘zbek tilida sodda va tushunarli "
+        "javob ber. Foydalanuvchiga hurmat bilan murojaat qil.\n\n"
         + "\n".join(conversation)
         + "\nassistant:"
     )
@@ -154,7 +158,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not client:
-        await update.message.reply_text("AI xizmati sozlanmagan. Administrator API kalitini tekshirishi kerak.")
+        await update.message.reply_text("AI xizmati sozlanmagan.")
         return
 
     now = asyncio.get_running_loop().time()
@@ -167,42 +171,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         answer = await ask_gemini(user_id, question)
+
         save_message(user_id, "user", question)
         save_message(user_id, "assistant", answer)
 
-        if len(answer) > 4000:
-            for i in range(0, len(answer), 4000):
-                await update.message.reply_text(answer[i:i + 4000])
-        else:
+        if len(answer) <= 4000:
             await wait.edit_text(answer)
+        else:
+            await wait.edit_text(answer[:4000])
+            for i in range(4000, len(answer), 4000):
+                await update.message.reply_text(answer[i:i + 4000])
 
     except Exception:
         logger.exception("Gemini xatosi")
-        await wait.edit_text("Kechirasiz, xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring.")
+        await wait.edit_text(
+            "Kechirasiz, xatolik yuz berdi. Birozdan keyin qayta urinib ko‘ring."
+        )
 
 
 async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎤 Ovozli xabaringizni oldim. Ovoz bilan ishlash funksiyasini keyingi bosqichda ulaymiz."
+        "🎤 Ovozli xabaringizni oldim. Ovoz bilan ishlash funksiyasini "
+        "keyingi bosqichda ulaymiz."
     )
 
 
 def main():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN sozlanmagan!")
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY sozlanmagan!")
+    required = {
+        "BOT_TOKEN": BOT_TOKEN,
+        "GEMINI_API_KEY": GEMINI_API_KEY,
+        "WEBHOOK_PATH": WEBHOOK_PATH,
+        "WEBHOOK_SECRET": WEBHOOK_SECRET,
+        "RENDER_EXTERNAL_URL": RENDER_URL,
+    }
+
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise ValueError("Sozlanmagan o'zgaruvchilar: " + ", ".join(missing))
 
     init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.VOICE, voice_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
 
-    print("SULTONGPT ISHGA TUSHDI!")
-    app.run_polling()
+    logger.info("SULTONGPT WEBHOOK ISHGA TUSHMOQDA")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_PATH,
+        webhook_url=f"{RENDER_URL}/{WEBHOOK_PATH}",
+        secret_token=WEBHOOK_SECRET,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
